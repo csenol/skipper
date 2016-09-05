@@ -1,9 +1,16 @@
 package tee
 
 import (
+	"fmt"
+	"github.com/zalando/skipper/eskip"
 	"github.com/zalando/skipper/filters"
 	"github.com/zalando/skipper/filters/filtertest"
+	"github.com/zalando/skipper/proxy/proxytest"
+	"io/ioutil"
 	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -18,7 +25,7 @@ func TestTeeHostHeaderChanges(t *testing.T) {
 	fc := buildfilterContext()
 
 	rep, _ := f.(*tee)
-	modifiedRequest := cloneRequest(rep, fc.Request())
+	_, modifiedRequest := cloneRequest(rep, fc.Request())
 	if modifiedRequest.Host != "api.example.com" {
 		t.Error("Tee Request Host not modified")
 	}
@@ -34,7 +41,7 @@ func TestTeeSchemeChanges(t *testing.T) {
 	fc := buildfilterContext()
 
 	rep, _ := f.(*tee)
-	modifiedRequest := cloneRequest(rep, fc.Request())
+	_, modifiedRequest := cloneRequest(rep, fc.Request())
 	if modifiedRequest.URL.Scheme != "https" {
 		t.Error("Tee Request Scheme not modified")
 	}
@@ -50,7 +57,7 @@ func TestTeeUrlHostChanges(t *testing.T) {
 	fc := buildfilterContext()
 
 	rep, _ := f.(*tee)
-	modifiedRequest := cloneRequest(rep, fc.Request())
+	_, modifiedRequest := cloneRequest(rep, fc.Request())
 	if modifiedRequest.URL.Host != "api.example.com" {
 		t.Error("Tee Request Url Host not modified")
 	}
@@ -66,7 +73,7 @@ func TestTeeWithPathChanges(t *testing.T) {
 	fc := buildfilterContext()
 
 	rep, _ := f.(*tee)
-	modifiedRequest := cloneRequest(rep, fc.Request())
+	_, modifiedRequest := cloneRequest(rep, fc.Request())
 	if modifiedRequest.URL.Path != "/v1/" {
 		t.Errorf("Tee Request Path not modified, %v", modifiedRequest.URL.Path)
 	}
@@ -75,6 +82,77 @@ func TestTeeWithPathChanges(t *testing.T) {
 	if originalRequest.URL.Path != "/api/v3" {
 		t.Errorf("Incoming Request Scheme modified, %v", originalRequest.URL.Path)
 	}
+}
+
+type MyHandler struct {
+	name string
+	body string
+}
+
+func (h *MyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	//r.Body.Close()
+	b, _ := ioutil.ReadAll(r.Body)
+	str := string(b)
+	h.body = str
+	fmt.Println("Server Running")
+	fmt.Println(h.name)
+	fmt.Println(str)
+	fmt.Println("Served")
+}
+
+func TestTeeUrlBodyChanges(t *testing.T) {
+	f, _ := testTeeSpec.CreateFilter(teeArgsAsBackend)
+	str := "Hello World"
+	r, _ := http.NewRequest("POST", "http://example.org/api/v3", strings.NewReader(str))
+	fc := &filtertest.Context{FRequest: r}
+
+	rep, _ := f.(*tee)
+	_, modifiedRequest := cloneRequest(rep, fc.Request())
+	r.Body.Close()
+	modifiedRequest.Body.Close()
+	originalBody, _ := ioutil.ReadAll(r.Body)
+	teeBody, _ := ioutil.ReadAll(modifiedRequest.Body)
+
+	var areEqual bool = reflect.DeepEqual(originalBody, teeBody)
+
+	if !areEqual {
+		t.Error("Bodies are not equal")
+	}
+}
+
+func TestTeeEndToEndBody(t *testing.T) {
+	shadowHandler := &MyHandler{name: "shadow"}
+	shadowServer := httptest.NewServer(shadowHandler)
+	shadowUrl := shadowServer.URL
+	defer shadowServer.Close()
+
+	originalHandler := &MyHandler{name: "original"}
+	originalServer := httptest.NewServer(originalHandler)
+	originalUrl := originalServer.URL
+	defer originalServer.Close()
+
+	routeStr := "route1: * -> Tee(\"" + shadowUrl + "\")" + " -> " + "\"" + originalUrl + "\";"
+
+	route, _ := eskip.Parse(routeStr)
+	registery := make(filters.Registry)
+	registery.Register(NewTee())
+	p := proxytest.New(registery, route...)
+	defer p.Close()
+
+	//str := "Hello World"
+
+	req, _ := http.NewRequest("GET", p.URL, strings.NewReader("TESTEST"))
+	req.Host = "www.example.org"
+	req.Header.Set("X-Test", "true")
+	req.Close = true
+	rsp, _ := (&http.Client{}).Do(req)
+	fmt.Println("Request Done")
+	rsp.Body.Close()
+	fmt.Println("Response Body Closed")
+	if !reflect.DeepEqual(shadowHandler.body, originalHandler.body) {
+		t.Error("Bodies are not equal")
+	}
+
 }
 
 func buildfilterContext() filters.FilterContext {

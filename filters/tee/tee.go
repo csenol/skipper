@@ -4,13 +4,15 @@ import (
 	"fmt"
 	log "github.com/Sirupsen/logrus"
 	"github.com/zalando/skipper/filters"
+	"io"
+	"io/ioutil"
 	"net/http"
 	"net/url"
 	"regexp"
 )
 
 const (
-	Name = "tee"
+	Name = "Tee"
 )
 
 type teeSpec struct{}
@@ -53,19 +55,20 @@ func (r *tee) Response(filters.FilterContext) {}
 
 // Request is copied and then modified to adopt changes in new backend
 func (r *tee) Request(fc filters.FilterContext) {
-	copyOfRequest := cloneRequest(r, fc.Request())
+	pw, copyOfRequest := cloneRequest(r, fc.Request())
 	go func() {
 		rsp, err := r.client.Do(&copyOfRequest)
 		if err != nil {
 			log.Warn("error while tee request", err)
 		}
 		defer rsp.Body.Close()
+		defer pw.Close()
 	}()
 }
 
 // copies requests changes URL and Host in request.
 // If 2nd and 3rd params are given path is also modified by applying regexp
-func cloneRequest(rep *tee, req *http.Request) http.Request {
+func cloneRequest(rep *tee, req *http.Request) (io.PipeWriter, http.Request) {
 	copyOfRequest := new(http.Request)
 	*copyOfRequest = *req
 	copyUrl := new(url.URL)
@@ -74,14 +77,16 @@ func cloneRequest(rep *tee, req *http.Request) http.Request {
 	copyOfRequest.URL.Host = rep.host
 	copyOfRequest.URL.Scheme = rep.scheme
 	copyOfRequest.Host = rep.host
-	//Need toc copy body
-	// copyOfRequest.Body = ???
-	//request URI should be empty
+
+	pr, pw := io.Pipe()
+	tr := io.TeeReader(req.Body, pw)
+	copyOfRequest.Body = ioutil.NopCloser(tr)
+	req.Body = pr
 	copyOfRequest.RequestURI = ""
 	if rep.typ == pathModified {
 		copyOfRequest.URL.Path = string(rep.rx.ReplaceAllString(copyOfRequest.URL.Path, rep.replacement))
 	}
-	return *copyOfRequest
+	return *pw, *copyOfRequest
 }
 
 // Creates out tee Filter
